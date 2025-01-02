@@ -350,8 +350,8 @@ class RNNJANSEN(AbstractNMM):
             for step_i in range(self.steps_per_TR):
                 Ed = pttranspose(hE.clone().gather(1,self.delays), 0, 1)
                 
-                LEd_p2i = ptreshape(ptsum(w_n_b * Ed, 1), (n_nodes, 1)) - ptmatmul(dg_b, E - I)
-                LEd_p2e = ptreshape(ptsum(w_n_f * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_f, E - I)
+                LEd_p2i = ptreshape(ptsum(w_n_b * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_b, P)
+                LEd_p2e = ptreshape(ptsum(w_n_f * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_f, P)
                 LEd_p2p = ptreshape(ptsum(w_n_l * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_l, P)
 
                 # external input
@@ -416,7 +416,7 @@ class RNNJANSEN(AbstractNMM):
 
             # Capture the states at every tr in the placeholders which is then used in the cost calculation.
             lm_t = (lm.T / torch.sqrt((lm ** 2).sum(1))).T
-            lm_t_dm = (lm_t - 1 / n_chans * torch.matmul(torch.ones((1, n_chans)), lm_t))
+            lm_t_dm = (lm_t - 1 / n_chans * torch.matmul(torch.ones((1,n_chans)), lm_t))
             temp = cy0 * torch.matmul(lm_t_dm, E-I) - 1 * y0
             eeg_window.append(temp)
             states_window.append(torch.cat([torch.cat([P, E, I], dim=1)[:,:,np.newaxis], \
