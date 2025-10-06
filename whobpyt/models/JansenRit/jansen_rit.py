@@ -127,7 +127,7 @@ class RNNJANSEN(AbstractNMM):
         method_arg_type_check(self.__init__) # Check that the passed arguments (excluding self) abide by their expected data types
 
         super(RNNJANSEN, self).__init__(params)
-        
+
         self.pop_names = np.array(['P', 'E', 'I'])
         self.state_names = np.array(['current', 'voltage'])
         self.output_names = ["eeg"]
@@ -169,8 +169,8 @@ class RNNJANSEN(AbstractNMM):
             Tensor of shape (node_size, state_size) with random values between `state_lb` and `state_ub`.
         """
 
-        state_lb = -0.1
-        state_ub = 0.1
+        state_lb = -0.01
+        state_ub = 0.01
 
         return torch.tensor(np.random.uniform(state_lb, state_ub, (self.node_size, self.pop_size, self.state_size)),
                              dtype=torch.float32)
@@ -203,11 +203,11 @@ class RNNJANSEN(AbstractNMM):
          # Create the arrays in numpy
         small_constant = 0.05
         n_nodes = self.node_size
-        zsmat = zeros((self.node_size, self.node_size)) + small_constant 
+        zsmat = zeros((self.node_size, 2)) + small_constant
         w_p2e = zsmat.copy() # the pyramidal to excitatory interneuron cross-layer gains
         w_p2i = zsmat.copy() # the pyramidal to inhibitory interneuron cross-layer gains
         w_p2p = zsmat.copy() # the pyramidal to pyramidal cells same-layer gains
-        
+
         # Set w_bb, w_ff, and w_ll as attributes as type Parameter if use_fit_gains is True
         if self.use_fit_gains:
             self.w_bb = ptParameter(pttensor(w_p2i, dtype=ptfloat32))
@@ -221,7 +221,7 @@ class RNNJANSEN(AbstractNMM):
             self.w_ff = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32)
             self.w_ll = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32)
 
-        
+
     def forward(self, external, hx, hE):
         """
         This function carries out the forward Euler integration method for the JR neural mass model,
@@ -266,7 +266,7 @@ class RNNJANSEN(AbstractNMM):
         a = 0 * con_1 + m(self.params.a.value())
         B = 0 * con_1 + m(self.params.B.value())
         b = 0 * con_1 + m(self.params.b.value())
-        g = (lb * con_1 + m(self.params.g.value()))
+        g = 1*(lb * con_1 + m(self.params.g.value()))
         c1 = (lb * con_1 + m(self.params.c1.value()))
         c2 = (lb * con_1 + m(self.params.c2.value()))
         c3 = (lb * con_1 + m(self.params.c3.value()))
@@ -281,8 +281,11 @@ class RNNJANSEN(AbstractNMM):
         cy0 = self.params.cy0.value()
         ki = self.params.ki.value()
 
-        g_f = (lb * con_1 + m(self.params.g_f.value()))
-        g_b = (lb * con_1 + m(self.params.g_b.value()))
+        g_f = 1*(lb * con_1 + m(self.params.g_f.value()))
+        g_b = 1*(lb * con_1 + m(self.params.g_b.value()))
+        #w_bb = 1*(lb * con_1 + m(self.params.w_bb.value()))
+        #w_ff = 1*(lb * con_1 + m(self.params.w_ff.value()))
+        #w_ll = 1*(lb * con_1 + m(self.params.w_ll.value()))
         lm = self.params.lm.value()
 
         next_state = {}
@@ -298,27 +301,30 @@ class RNNJANSEN(AbstractNMM):
         dt = self.step_size
         n_nodes = self.node_size
         n_chans = self.output_size
-        
+
         sc = self.sc
         ptsc = pttensor(sc, dtype=ptfloat32)
 
         if self.sc.shape[0] > 1:
 
             # Update the Laplacian based on the updated connection gains w_bb.
-            w_b = ptexp(self.w_bb) * ptsc
-            w_n_b = w_b / ptnorm(w_b)*pttensor(self.mask, dtype=ptfloat32)
+            w_b = ptdiag(ptexp(self.w_bb[:,0])) @ ptsc @ ptdiag(ptexp(self.w_bb[:,1]))
+            #w_b =ptexp(self.w_bb) * ptsc
+            w_n_b = w_b #/ ptnorm(w_b)*pttensor(self.mask, dtype=ptfloat32)
             self.sc_m_b = w_n_b
             dg_b = -ptdiag(ptsum(w_n_b, dim=1))
 
             # Update the Laplacian based on the updated connection gains w_ff.
-            w_f = ptexp(self.w_ff) * ptsc     
-            w_n_f = w_f / ptnorm(w_f)*pttensor(self.mask, dtype=ptfloat32)
+            w_f = ptdiag(ptexp(self.w_ff[:,0])) @ ptsc @ ptdiag(ptexp(self.w_ff[:,1]))
+            #w_f =ptexp(self.w_ff) * ptsc
+            w_n_f = w_f #/ ptnorm(w_f)*pttensor(self.mask, dtype=ptfloat32)
             self.sc_m_f = w_n_f
             dg_f = -ptdiag(ptsum(w_n_f, dim=1))
 
             # Update the Laplacian based on the updated connection gains w_ll.
-            w_l = ptexp(self.w_ll) * ptsc         
-            w_n_l = (0.5 * (w_l + pttranspose(w_l, 0, 1))) / ptnorm(0.5 * (w_l + pttranspose(w_l, 0, 1)))*pttensor(self.mask, dtype=ptfloat32)
+            w_l = ptdiag(ptexp(self.w_ll[:,0])) @ ptsc @ ptdiag(ptexp(self.w_ll[:,0]))
+            #w_l =ptexp(self.w_ll) * ptsc
+            w_n_l = (0.5 * (w_l + pttranspose(w_l, 0, 1))) #/ ptnorm(0.5 * (w_l + pttranspose(w_l, 0, 1)))*pttensor(self.mask, dtype=ptfloat32)
             self.sc_fitted = w_n_l
             dg_l = -ptdiag(ptsum(w_n_l, dim=1))
         else:
@@ -347,47 +353,48 @@ class RNNJANSEN(AbstractNMM):
 
         # Use the forward model to get EEG signal at the i-th element in the window.
         for i_window in range(self.TRs_per_window):
+            Ed = pttranspose(hE.clone().gather(1,self.delays), 0, 1)
+
+            LEd_p2i = ptreshape(ptsum(w_n_b * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_b, I -E)
+            LEd_p2e = ptreshape(ptsum(w_n_f * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_f, E -I)
+            LEd_p2p = ptreshape(ptsum(w_n_l * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_l, P)
             for step_i in range(self.steps_per_TR):
-                Ed = pttranspose(hE.clone().gather(1,self.delays), 0, 1)
-                
-                LEd_p2i = ptreshape(ptsum(w_n_b * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_b, P)
-                LEd_p2e = ptreshape(ptsum(w_n_f * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_f, P)
-                LEd_p2p = ptreshape(ptsum(w_n_l * Ed, 1), (n_nodes, 1)) + ptmatmul(dg_l, P)
+
 
                 # external input
                 u_stim = external[:, step_i:step_i + 1, i_window, 0]
-                
+
                 # Stochastic / noise term
-                P_noise = std_in * ptrandn(n_nodes, 1) 
+                P_noise = std_in * ptrandn(n_nodes, 1)
                 E_noise = std_in * ptrandn(n_nodes, 1)
                 I_noise = std_in * ptrandn(n_nodes, 1)
-                
-                # Compute the firing rate for each neural populatin 
+
+                # Compute the firing rate for each neural populatin
                 # at every node using the wave-to-pulse (sigmoid) functino
                 # (vmax = max value of sigmoid, v0 = midpoint of sigmoid)
                 P_sigm = vmax / ( 1 + ptexp ( r*(v0 -  (E-I) ) ) )
                 E_sigm = vmax / ( 1 + ptexp ( r*(v0 - (c1*P) ) ) )
                 I_sigm = vmax / ( 1 + ptexp ( r*(v0 - (c3*P) ) ) )
-                # Sum the four different input types into a single input value for each neural 
+                # Sum the four different input types into a single input value for each neural
                 # populatin state variable
                 # The four input types are:
                 # - Local      (L)      - from other neural populations within a node (E->P,P->I, etc.)
-                # - Long-range (L-R)    - from other nodes in the network, weighted by the long-range 
+                # - Long-range (L-R)    - from other nodes in the network, weighted by the long-range
                 #                         connectivity matrices, and time-delayed
                 # - Noise      (N)      - stochastic noise input
                 # - External   (E)      - external stimulation, eg from TMS or sensory stimulus
                 #
                 #        Local    Long-range   Noise   External
-                rP =     P_sigm  + g*LEd_p2p   + P_noise + k*ki*u_stim 
-                rE =  c2*E_sigm  + g_f*LEd_p2e + E_noise          
-                rI =  c4*I_sigm  + g_b*LEd_p2i + I_noise 
-                
+                rP =     P_sigm  + g*LEd_p2p   + P_noise + k*ki*u_stim
+                rE =  c2*E_sigm  + g_f*LEd_p2e + E_noise
+                rI =  c4*I_sigm  + g_b*LEd_p2i + I_noise
+
                 # Apply some additional scaling
                 rP_bd = u_2ndsys_ub * pttanh(rP / u_2ndsys_ub)
                 rE_bd = u_2ndsys_ub * pttanh(rE / u_2ndsys_ub)
                 rI_bd = u_2ndsys_ub * pttanh(rI / u_2ndsys_ub)
 
-                # Compute d/dt   ('_tp1' = state variable at time t+1) 
+                # Compute d/dt   ('_tp1' = state variable at time t+1)
                 P_tp1 =  P + dt * Pv
                 E_tp1 =  E + dt * Ev
                 I_tp1 =  I + dt * Iv
@@ -396,7 +403,7 @@ class RNNJANSEN(AbstractNMM):
                 Iv_tp1 = Iv + dt * ( B*b*rI_bd  -  2*b*Iv  -  b**2 * I )
 
                 # Calculate the saturation for model states (for stability and gradient calculation).
-                
+
                 # Add some additional saturation on the model states
                 # (for stability and gradient calculation).
                 P = 1000*pttanh(P_tp1/1000)
@@ -407,7 +414,7 @@ class RNNJANSEN(AbstractNMM):
                 Iv = 1000*pttanh(Iv_tp1/1000)
                 #print('after M', M.shape)
                 # Update placeholders for pyramidal buffer
-                hE[:, 0] = P[:,0]
+                #hE[:, 0] = P[:,0]
 
             # Capture the states at every tr in the placeholders for checking them visually.
 
@@ -417,13 +424,13 @@ class RNNJANSEN(AbstractNMM):
             # Capture the states at every tr in the placeholders which is then used in the cost calculation.
             lm_t = (lm.T / torch.sqrt((lm ** 2).sum(1))).T
             lm_t_dm = (lm_t - 1 / n_chans * torch.matmul(torch.ones((1,n_chans)), lm_t))
-            temp = cy0 * torch.matmul(lm_t_dm, E-I) - 1 * y0
+            temp = cy0 * torch.matmul(lm_t_dm, (E-I)[:200]) - 1 * y0
             eeg_window.append(temp)
             states_window.append(torch.cat([torch.cat([P, E, I], dim=1)[:,:,np.newaxis], \
                                    torch.cat([Pv, Ev, Iv], dim=1)[:,:,np.newaxis]], dim=2)[:,:,:,np.newaxis])
         # Update the current state.
         self.lm_t = lm_t_dm
-        
+
         current_state = torch.cat([torch.cat([P, E, I], dim=1)[:,:,np.newaxis], \
                                    torch.cat([Pv, Ev, Iv], dim=1)[:,:,np.newaxis]], dim=2)
         next_state['current_state'] = current_state
