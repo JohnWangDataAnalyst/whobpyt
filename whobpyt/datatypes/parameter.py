@@ -34,7 +34,7 @@ class par:
         Whether the log of the parameter value will be stored instead of the parameter itself (will prevent parameter from being negative).
     '''
 
-    def __init__(self, val, prior_mean = None, prior_std = None, fit_par = False, asLog = False, asRand = True, lb = 0, device = torch.device('cpu')):
+    def __init__(self, val, prior_mean = None, prior_std = None, fit_par = False, asLog = False, asRand = True, lb = 0, device = torch.device('cpu'), asLogit = False, ub = 1.0, l1_weight = 0.0):
         '''
 
         Parameters
@@ -49,12 +49,28 @@ class par:
             Whether the parameter value should be set to as a PyTorch Parameter
         device: torch.device
             Whether to run on CPU or GPU
+        asLogit : Bool
+            Whether the parameter value represents a logit, so that value() is bounded to (lb, ub)
+            via a sigmoid, instead of being stored directly (or as log(val), see asLog).
+        ub : Float
+            Upper bound used when asLogit is True. Ignored otherwise.
+        l1_weight : Float
+            If > 0, AbstractLoss.l1_loss() will add l1_weight * sum(|value()|) to the objective
+            for this parameter -- a sparsity-inducing penalty pulling value() toward lb (its
+            zero-deviation point) that, unlike a ridge/precision-based prior, snaps
+            fit-irrelevant entries to exactly that point rather than merely shrinking them.
+            Most useful for large (e.g. per-edge connectivity-gain) matrix parameters, where a
+            jointly-trained prior precision (fit_hyper) is degenerate (see prior_loss()'s
+            docstring). Independent of, and stackable with, prior_mean/prior_std/fit_hyper.
         '''
         self.fit_par = fit_par
         self.device = device
         self.asLog = asLog
+        self.asLogit = asLogit
         self.asRand = asRand
         self.lb = torch.tensor(lb, dtype=torch.float32).to(self.device)
+        self.ub = torch.tensor(ub, dtype=torch.float32).to(self.device)
+        self.l1_weight = l1_weight
         self.fit_hyper = False
 
         if self.fit_par:
@@ -102,6 +118,11 @@ class par:
         
         if self.asLog:
             return self.lb.detach().clone().cpu().numpy() + np.exp(self.val.detach().clone().cpu().numpy())
+        elif self.asLogit:
+            lb = self.lb.detach().clone().cpu().numpy()
+            ub = self.ub.detach().clone().cpu().numpy()
+            v = self.val.detach().clone().cpu().numpy()
+            return lb + (ub - lb) / (1 + np.exp(-v))
         else:
             return self.lb.detach().clone().cpu().numpy() + self.val.detach().clone().cpu().numpy()
 
@@ -116,6 +137,8 @@ class par:
 
         if self.asLog:
             return self.lb + torch.exp(self.val)
+        elif self.asLogit:
+            return self.lb + (self.ub - self.lb) * torch.sigmoid(self.val)
         else:
             return self.lb + self.val
 

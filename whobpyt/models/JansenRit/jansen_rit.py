@@ -136,6 +136,11 @@ class RNNJANSEN(AbstractNMM):
         self.dist = torch.tensor(dist, dtype=torch.float32)
         self.lm = lm
         self.use_fit_gains = use_fit_gains  # flag for fitting gains
+        # Only consulted on the params.w_bb/w_ff/w_ll (par-based, possibly bounded/regularized)
+        # path in forward(); the legacy use_fit_gains path always re-normalizes each gain matrix
+        # regardless of this flag. Callers may set this attribute after construction to opt into
+        # re-normalizing to unit Frobenius norm on the par-based path too.
+        self.normalize_sc_fitted = False
         self.use_fit_lfm = use_fit_lfm
         self.params = params
         self.output_size = lm.shape[0]  # number of EEG channels
@@ -192,23 +197,46 @@ class RNNJANSEN(AbstractNMM):
         Sets the parameters of the model.
         """
         
-        # Set w_bb, w_ff, and w_ll as attributes as type Parameter if use_fit_gains is True
-        if self.use_fit_gains:
+        # Set w_bb, w_ff, and w_ll as attributes as type Parameter if use_fit_gains is True.
+        #
+        # If a `par`-typed w_bb/w_ff/w_ll was already attached to self.params before this model
+        # was constructed, setModelParameters() (called just before this, in __init__) will have
+        # already wrapped it as a Parameter and wired it into prior_loss()/l1_loss() -- e.g.
+        # par(..., asLogit=True, lb=..., ub=..., l1_weight=...) for a bounded, L1-regularized
+        # gain matrix, mirroring RNNRWW's identical pattern in wong_wang.py. In that case skip
+        # creating the legacy fully-unconstrained Parameter for that matrix -- forward() will
+        # read it from self.params.<name> instead. Each of w_bb/w_ff/w_ll is checked
+        # independently, so e.g. only w_ll (the one used as self.sc_fitted) can use the new
+        # bounded/regularized path while w_ff/w_bb stay on the legacy one. Old scripts (which
+        # never set params.w_bb/w_ff/w_ll) keep working exactly as before.
+        if hasattr(self.params, 'w_bb'):
+            self.w_bb = None
+        elif self.use_fit_gains:
             self.w_bb = Parameter(torch.tensor(np.zeros((self.node_size, self.node_size)) + 0.05, # the backwards gains
                                                 dtype=torch.float32))
-            self.w_ff = Parameter(torch.tensor(np.zeros((self.node_size, self.node_size)) + 0.05, # the forward gains
-                                                dtype=torch.float32))
-            self.w_ll = Parameter(torch.tensor(np.zeros((self.node_size, self.node_size)) + 0.05, # the lateral gains
-                                                dtype=torch.float32))
-            self.params_fitted['modelparameter'].append(self.w_ll)
-            self.params_fitted['modelparameter'].append(self.w_ff)
             self.params_fitted['modelparameter'].append(self.w_bb)
         else:
             self.w_bb = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32)
+
+        if hasattr(self.params, 'w_ff'):
+            self.w_ff = None
+        elif self.use_fit_gains:
+            self.w_ff = Parameter(torch.tensor(np.zeros((self.node_size, self.node_size)) + 0.05, # the forward gains
+                                                dtype=torch.float32))
+            self.params_fitted['modelparameter'].append(self.w_ff)
+        else:
             self.w_ff = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32)
+
+        if hasattr(self.params, 'w_ll'):
+            self.w_ll = None
+        elif self.use_fit_gains:
+            self.w_ll = Parameter(torch.tensor(np.zeros((self.node_size, self.node_size)) + 0.05, # the lateral gains
+                                                dtype=torch.float32))
+            self.params_fitted['modelparameter'].append(self.w_ll)
+        else:
             self.w_ll = torch.tensor(np.zeros((self.node_size, self.node_size)), dtype=torch.float32)
 
-        
+
 
 
     def forward(self, external, hx, hE):
@@ -286,22 +314,36 @@ class RNNJANSEN(AbstractNMM):
 
         if self.sc.shape[0] > 1:
 
-            # Update the Laplacian based on the updated connection gains w_bb.
-            w_b = torch.exp(self.w_bb) * torch.tensor(self.sc, dtype=torch.float32)
-            w_n_b = w_b / torch.linalg.norm(w_b)
+            # Update the Laplacian based on the updated connection gains w_bb. If a par-typed
+            # (possibly bounded/regularized) params.w_bb is attached, use its gain instead of the
+            # legacy unconstrained self.w_bb (None on that path -- see setModelSCParameters()).
+            gain_bb = torch.exp(self.params.w_bb.value()) if hasattr(self.params, 'w_bb') else torch.exp(self.w_bb)
+            w_b = gain_bb * torch.tensor(self.sc, dtype=torch.float32)
+            if hasattr(self.params, 'w_bb') and not self.normalize_sc_fitted:
+                w_n_b = w_b
+            else:
+                w_n_b = w_b / torch.linalg.norm(w_b)
             self.sc_m_b = w_n_b
             dg_b = -torch.diag(torch.sum(w_n_b, dim=1))
 
             # Update the Laplacian based on the updated connection gains w_ff.
-            w_f = torch.exp(self.w_ff) * torch.tensor(self.sc, dtype=torch.float32)
-            w_n_f = w_f / torch.linalg.norm(w_f)
+            gain_ff = torch.exp(self.params.w_ff.value()) if hasattr(self.params, 'w_ff') else torch.exp(self.w_ff)
+            w_f = gain_ff * torch.tensor(self.sc, dtype=torch.float32)
+            if hasattr(self.params, 'w_ff') and not self.normalize_sc_fitted:
+                w_n_f = w_f
+            else:
+                w_n_f = w_f / torch.linalg.norm(w_f)
             self.sc_m_f = w_n_f
             dg_f = -torch.diag(torch.sum(w_n_f, dim=1))
 
             # Update the Laplacian based on the updated connection gains w_ll.
-            w_l = torch.exp(self.w_ll) * torch.tensor(self.sc, dtype=torch.float32)
-            w_n_l = (0.5 * (w_l + torch.transpose(w_l, 0, 1))) / torch.linalg.norm(
-                0.5 * (w_l + torch.transpose(w_l, 0, 1)))
+            gain_ll = torch.exp(self.params.w_ll.value()) if hasattr(self.params, 'w_ll') else torch.exp(self.w_ll)
+            w_l = gain_ll * torch.tensor(self.sc, dtype=torch.float32)
+            sc_sym = 0.5 * (w_l + torch.transpose(w_l, 0, 1))
+            if hasattr(self.params, 'w_ll') and not self.normalize_sc_fitted:
+                w_n_l = sc_sym
+            else:
+                w_n_l = sc_sym / torch.linalg.norm(sc_sym)
             self.sc_fitted = w_n_l
             dg_l = -torch.diag(torch.sum(w_n_l, dim=1))
         else:

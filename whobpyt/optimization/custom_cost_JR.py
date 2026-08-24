@@ -33,7 +33,7 @@ class CostsJR(AbstractLoss):
 
         loss_EI = 0
         loss_prior = self.mainLoss.prior_loss()
+        loss_l1 = self.mainLoss.l1_loss()
 
-        
-        loss = 0.1 * w_cost * loss_main + 1 * sum(loss_prior) + 1 * loss_EI
+        loss = 0.1 * w_cost * loss_main + 1 * sum(loss_prior) + 1 * loss_EI + sum(loss_l1)
         return loss, loss_main

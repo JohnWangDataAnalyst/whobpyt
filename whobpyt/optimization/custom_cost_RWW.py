@@ -43,9 +43,10 @@ class CostsRWW(AbstractLoss):
         
 
         loss_prior = self.mainLoss.prior_loss()
+        loss_l1 = self.mainLoss.l1_loss()
 
         #print(loss_main)
-          
+
         # total loss
-        loss = w_cost * loss_main + sum(loss_prior) 
+        loss = w_cost * loss_main + sum(loss_prior) + sum(loss_l1)
         return loss, loss_main
