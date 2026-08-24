@@ -129,6 +129,11 @@ class RNNRWW(AbstractNMM):
         self.sc = sc  # matrix node_size x node_size structure connectivity
         self.sc_fitted = torch.tensor(sc, dtype=torch.float32)  # placeholder
         self.use_fit_gains = use_fit_gains  # flag for fitting gains
+        # Only consulted on the params.w_ll (par-based gain) path in forward(); the legacy
+        # use_fit_gains path always re-normalizes sc_fitted regardless of this flag. Callers may
+        # set this attribute after construction to opt into re-normalizing sc_fitted to unit
+        # Frobenius norm on the params.w_ll path too (matching the legacy path's behavior).
+        self.normalize_sc_fitted = False
         
         self.output_size = node_size
         
@@ -192,9 +197,15 @@ class RNNRWW(AbstractNMM):
 
         
 
-        # Set w_bb, w_ff, and w_ll as attributes as type Parameter if use_fit_gains is True
-        if self.use_fit_gains:
-            
+        # If a `par`-typed w_ll was already attached to self.params before this model was
+        # constructed, setModelParameters() (called just before this, in __init__) will have
+        # already wrapped it as a Parameter and wired it into prior_loss(). In that case we
+        # don't create a second, unconstrained w_ll here -- forward() will read it from
+        # self.params.w_ll instead. This keeps old scripts (which never set params.w_ll) working
+        # exactly as before.
+        if hasattr(self.params, 'w_ll'):
+            self.w_ll = None
+        elif self.use_fit_gains:
             self.w_ll = Parameter(torch.tensor(np.zeros((self.node_size, self.node_size)) + 0.05, # the lateral gains
                                                 dtype=torch.float32))
             self.params_fitted['modelparameter'].append(self.w_ll)
@@ -228,7 +239,7 @@ class RNNRWW(AbstractNMM):
     
     
         # Defining NMM Parameters to simplify later equations
-        std_in =  self.params.std_in.value()  # 0.02 the lower bound (standard deviation of the Gaussian noise)
+        std_in =  0.02 + m(self.params.std_in.value())  # 0.02 the lower bound (standard deviation of the Gaussian noise)
         
         # Parameters for the ODEs
         # Excitatory population
@@ -247,10 +258,10 @@ class RNNRWW(AbstractNMM):
     
         # Coupling parameters
         g = self.params.g.value()  # global coupling (from all nodes E_j to single node E_i)
-        g_EE =  self.params.g_EE.value()  # local self excitatory feedback (from E_i to E_i)
-        g_IE = self.params.g_IE.value()  # local inhibitory coupling (from I_i to E_i)
-        g_EI = self.params.g_EI.value()  # local excitatory coupling (from E_i to I_i)
-    
+        g_EE =  m(self.params.g_EE.value())  # local self excitatory feedback (from E_i to E_i)
+        g_IE = m(self.params.g_IE.value())  # local inhibitory coupling (from I_i to E_i)
+        g_EI = m(self.params.g_EI.value())  # local excitatory coupling (from E_i to I_i)
+        g_II = m(self.params.g_II.value())  # local excitatory coupling (from I_i to I_i)    
         aE = self.params.aE.value()
         bE = self.params.bE.value()
         dE = self.params.dE.value()
@@ -287,9 +298,27 @@ class RNNRWW(AbstractNMM):
         if self.sc.shape[0] > 1:
     
             # Update the Laplacian based on the updated connection gains gains_con.
-            sc_mod = torch.exp(self.w_ll) * torch.tensor(self.sc, dtype=torch.float32)
-            sc_mod_normalized = (0.5 * (sc_mod + torch.transpose(sc_mod, 0, 1))) / torch.linalg.norm(
-                0.5 * (sc_mod + torch.transpose(sc_mod, 0, 1)))
+            if hasattr(self.params, 'w_ll'):
+                log_gain = self.params.w_ll.value()  # bounded (lb, ub) in log-space via asLogit, regularized via prior_loss()
+                gain = torch.exp(log_gain)
+                sc_mod = gain * torch.tensor(self.sc, dtype=torch.float32)
+                # self.sc is already unit-Frobenius-norm (normalized once at load time in
+                # fit_one.py). Re-normalizing again here (as the legacy path below does) makes
+                # any globally-uniform component of gain a no-op -- e.g. gain==0.01 everywhere and
+                # gain==1 everywhere give an IDENTICAL post-normalization Laplacian -- so the only
+                # way w_ll could affect dynamics was by distorting the *relative* pattern across
+                # edges, not overall coupling strength. self.normalize_sc_fitted (default False,
+                # settable by the caller after construction) picks between the two.
+                sc_sym = 0.5 * (sc_mod + torch.transpose(sc_mod, 0, 1))
+                if self.normalize_sc_fitted:
+                    sc_mod_normalized = sc_sym / torch.linalg.norm(sc_sym)
+                else:
+                    sc_mod_normalized = sc_sym
+            else:
+                gain = torch.exp(self.w_ll)
+                sc_mod = gain * torch.tensor(self.sc, dtype=torch.float32)
+                sc_mod_normalized = (0.5 * (sc_mod + torch.transpose(sc_mod, 0, 1))) / torch.linalg.norm(
+                    0.5 * (sc_mod + torch.transpose(sc_mod, 0, 1)))
             self.sc_fitted = sc_mod_normalized
     
             lap_adj = -torch.diag(sc_mod_normalized.sum(1)) + sc_mod_normalized
@@ -323,7 +352,7 @@ class RNNRWW(AbstractNMM):
                 
                 # Calculate the input recurrent.
                 IE = torch.tanh(m(W_E * I_0 + g_EE * E + g * torch.matmul(lap_adj, E) - g_IE * I))  # input currents for E
-                II = torch.tanh(m(W_I * I_0 + g_EI * E - I))  # input currents for I
+                II = torch.tanh(m(W_I * I_0 + g_EI * E - g_II * I))  # input currents for I
 
                 # Calculate the firing rates.
                 rE = h_tf(aE, bE, dE, IE)  # firing rate for E
